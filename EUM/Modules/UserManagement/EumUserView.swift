@@ -7,20 +7,9 @@ struct EumUserView: View {
     @EnvironmentObject var store: DataService
     @Environment(\.horizontalSizeClass) private var hSize
 
-    // 查询
-    @State private var username = ""
-    @State private var phone = ""
-    @State private var status: Int?
-    // 分页
-    @State private var page = 1
-    @State private var pageSize = 10
-    @State private var total = 0
-    @State private var rows: [SysUser] = []
-    @State private var loading = false
-    @State private var hasMore = false
-    // 选择
-    @State private var selected: Set<Int> = []
-    // 动态页签
+    // 数据状态收敛到 ViewModel（MVVM：View 只渲染，业务走注入的 UserServiceProtocol）
+    @State private var viewModel: EumUserViewModel
+    // 动态页签（页面内导航状态，留在 View）
     @State private var tabs: [DynTab] = []
     @State private var active = "list"
 
@@ -36,6 +25,10 @@ struct EumUserView: View {
     // Mobile
     @State private var showFilter = false
     @State private var mobileForm: MobileTarget?
+
+    init(service: UserServiceProtocol = AppEnvironment.shared.users) {
+        _viewModel = State(initialValue: EumUserViewModel(service: service))
+    }
 
     /// 手机端表单 / 详情弹层目标
     enum MobileTarget: Identifiable {
@@ -78,8 +71,8 @@ struct EumUserView: View {
                 formAndDetailSections
             }
         }
-        .overlay { TableLoadingOverlay(loading: loading) }
-        .task { await load() }
+        .overlay { TableLoadingOverlay(loading: viewModel.loading) }
+        .task { await reload() }
     }
 
     // MARK: 头部（搜索 + 页签；手机端收纳为搜索框 + 筛选）
@@ -87,28 +80,28 @@ struct EumUserView: View {
     private var headerSection: some View {
         VStack(spacing: 8) {
             if isCompact {
-                MobileSearchBar(text: $username,
+                MobileSearchBar(text: $viewModel.username,
                                 placeholder: L("user.searchPlaceholder"),
-                                filterCount: (phone.isEmpty ? 0 : 1) + (status == nil ? 0 : 1),
+                                filterCount: viewModel.filterCount,
                                 onFilter: { showFilter = true },
-                                onSubmit: { page = 1; Task { await load() } })
+                                onSubmit: { viewModel.page = 1; Task { await reload() } })
                 FilterChipsBar(chips: filterChips, onClearAll: {
-                    phone = ""; status = nil
-                    page = 1
-                    Task { await load() }
+                    viewModel.resetFilters()
+                    viewModel.page = 1
+                    Task { await reload() }
                 })
             } else {
                 QueryForm {
-                    QueryField(label: L("eum.user.read.username"), text: $username)
-                    QueryField(label: L("eum.user.read.phone"), text: $phone)
-                    QueryPickerField(label: L("eum.status"), value: $status, options: DictOption.eumStatus)
+                    QueryField(label: L("eum.user.read.username"), text: $viewModel.username)
+                    QueryField(label: L("eum.user.read.phone"), text: $viewModel.phone)
+                    QueryPickerField(label: L("eum.status"), value: $viewModel.status, options: DictOption.eumStatus)
                 } onSearch: {
-                    page = 1
-                    Task { await load() }
+                    viewModel.page = 1
+                    Task { await reload() }
                 } onReset: {
-                    username = ""; phone = ""; status = nil
-                    page = 1
-                    Task { await load() }
+                    viewModel.resetFilters()
+                    viewModel.page = 1
+                    Task { await reload() }
                 }
                 DynTabBar(tabs: $tabs, active: $active, fixedTitle: L("list.users"))
             }
@@ -117,18 +110,18 @@ struct EumUserView: View {
 
     private var filterChips: [MobileFilterChip] {
         var chips: [MobileFilterChip] = []
-        if !phone.isEmpty {
-            chips.append(.init(id: "phone", label: "手机号：\(phone)", onRemove: {
-                phone = ""
-                page = 1
-                Task { await load() }
+        if !viewModel.phone.isEmpty {
+            chips.append(.init(id: "phone", label: "手机号：\(viewModel.phone)", onRemove: {
+                viewModel.phone = ""
+                viewModel.page = 1
+                Task { await reload() }
             }))
         }
-        if let status {
+        if let status = viewModel.status {
             chips.append(.init(id: "status", label: "状态：\(DictOption.eumStatus.first { $0.value == status }?.label ?? "\(status)")", onRemove: {
-                self.status = nil
-                page = 1
-                Task { await load() }
+                viewModel.status = nil
+                viewModel.page = 1
+                Task { await reload() }
             }))
         }
         return chips
@@ -144,23 +137,23 @@ struct EumUserView: View {
                 desktopList
             }
         }
-        .confirmationDialog(String(format: L("common.confirmDelete"), selected.count), isPresented: $showBatchDelete, titleVisibility: .visible) {
+        .confirmationDialog(String(format: L("common.confirmDelete"), viewModel.selected.count), isPresented: $showBatchDelete, titleVisibility: .visible) {
             Button(L("button.delete"), role: .destructive) { Task { await doBatchDelete() } }
             Button(L("button.cancel"), role: .cancel) {}
         }
         .alert(L("button.batchResetPwd"), isPresented: $showResetPwd) {
             TextField(L("user.newPassword"), text: $resetPwdText)
-            Button("确定") { Task { await doResetPwd() } }
+            Button(L("button.confirm")) { Task { await doResetPwd() } }
             Button(L("button.cancel"), role: .cancel) { resetPwdError = "" }
         } message: {
-            Text(resetPwdError.isEmpty ? String(format: L("user.batchPwdMessage"), selected.count) : resetPwdError)
+            Text(resetPwdError.isEmpty ? String(format: L("user.batchPwdMessage"), viewModel.selected.count) : resetPwdError)
         }
         .alert(String(format: L("user.resetPwdFor"), pwdTarget?.username ?? ""), isPresented: Binding(
             get: { pwdTarget != nil },
             set: { if !$0 { pwdTarget = nil } }
         )) {
             TextField(L("user.newPassword"), text: $singlePwdText)
-            Button("确定") { Task { await doSingleReset() } }
+            Button(L("button.confirm")) { Task { await doSingleReset() } }
             Button(L("button.cancel"), role: .cancel) { pwdTarget = nil }
         } message: {
             Text(singlePwdError.isEmpty ? L("user.pwdRule") : singlePwdError)
@@ -172,17 +165,17 @@ struct EumUserView: View {
                 case .add:
                     UserFormView(onClose: { mobileForm = nil }) {
                         mobileForm = nil
-                        Task { await load() }
+                        Task { await reload() }
                     }
                 case .edit(let id):
-                    if let user = rows.first(where: { $0.id == id }) {
+                    if let user = viewModel.rows.first(where: { $0.id == id }) {
                         UserFormView(user: user, onClose: { mobileForm = nil }) {
                             mobileForm = nil
-                            Task { await load() }
+                            Task { await reload() }
                         }
                     }
                 case .detail(let id):
-                    if let user = rows.first(where: { $0.id == id }) {
+                    if let user = viewModel.rows.first(where: { $0.id == id }) {
                         UserDetailView(user: user, onClose: { mobileForm = nil })
                     }
                 }
@@ -194,13 +187,13 @@ struct EumUserView: View {
         WireCard(fullHeight: true) {
             VStack(spacing: 0) {
                 toolbar
-                WireTable(columns: columns, rowCount: rows.count, selectable: true, selection: selectedIndexes) { idx in
+                WireTable(columns: columns, rowCount: viewModel.rows.count, selectable: true, selection: selectedIndexes) { idx in
                     onToggleRow(idx)
                 } rowAction: { idx in
                     row(idx)
                 }
-                PaginationBar(total: total, page: $page, pageSize: $pageSize) {
-                    Task { await load() }
+                PaginationBar(total: viewModel.total, page: $viewModel.page, pageSize: $viewModel.pageSize) {
+                    Task { await reload() }
                 }
             }
         }
@@ -209,9 +202,9 @@ struct EumUserView: View {
     private var mobileList: some View {
         ZStack(alignment: .bottomTrailing) {
             MobileCardList(
-                cards: rows.map(mobileCard),
-                total: total,
-                selection: $selected,
+                cards: viewModel.rows.map(mobileCard),
+                total: viewModel.total,
+                selection: $viewModel.selected,
                 batchActions: [
                     .init(title: L("button.batchDelete"), role: .danger) { showBatchDelete = true },
                     .init(title: L("button.batchResetPwd")) {
@@ -219,10 +212,10 @@ struct EumUserView: View {
                         showResetPwd = true
                     },
                 ],
-                onLoadMore: hasMore ? { await loadMore() } : nil,
-                hasMore: hasMore
+                onLoadMore: viewModel.hasMore ? { await loadMore() } : nil,
+                hasMore: viewModel.hasMore
             )
-            if selected.isEmpty {
+            if viewModel.selected.isEmpty {
                 MobileFAB { mobileForm = .add }
                     .padding(.trailing, 16)
                     .padding(.bottom, 18)
@@ -268,17 +261,17 @@ struct EumUserView: View {
                         HStack(spacing: 8) {
                             ForEach(DictOption.eumStatus) { opt in
                                 Button {
-                                    status = status == opt.value ? nil : opt.value
+                                    viewModel.status = viewModel.status == opt.value ? nil : opt.value
                                 } label: {
                                     Text(opt.label)
                                         .font(.system(size: 13))
-                                        .foregroundColor(status == opt.value ? .white : Theme.text)
+                                        .foregroundColor(viewModel.status == opt.value ? .white : Theme.text)
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 9)
-                                        .background(status == opt.value ? Theme.primary : Theme.panelBG)
+                                        .background(viewModel.status == opt.value ? Theme.primary : Theme.panelBG)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8)
-                                                .stroke(status == opt.value ? Theme.primary : Theme.border, lineWidth: 1)
+                                                .stroke(viewModel.status == opt.value ? Theme.primary : Theme.border, lineWidth: 1)
                                         )
                                         .clipShape(RoundedCorner(radius: 8))
                                 }
@@ -289,7 +282,7 @@ struct EumUserView: View {
                         Text(L("eum.user.read.phone"))
                             .font(.system(size: 12))
                             .foregroundColor(Theme.textSecondary)
-                        TextField(String(format: L("eum.placeholder.inputFormat"), L("eum.user.read.phone")), text: $phone)
+                        TextField(String(format: L("eum.placeholder.inputFormat"), L("eum.user.read.phone")), text: $viewModel.phone)
                             .font(.system(size: 13))
                             .keyboardType(.phonePad)
                             .padding(.horizontal, 10)
@@ -299,13 +292,12 @@ struct EumUserView: View {
                     }
                     HStack(spacing: 10) {
                         WireButton(title: L("button.reset"), variant: .defaultPlain) {
-                            phone = ""
-                            status = nil
+                            viewModel.resetFilters()
                         }
                         WireButton(title: L("button.confirm"), variant: .primary) {
                             showFilter = false
-                            page = 1
-                            Task { await load() }
+                            viewModel.page = 1
+                            Task { await reload() }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .trailing)
@@ -324,10 +316,10 @@ struct EumUserView: View {
             WireButton(title: L("button.add"), icon: "add-circle", variant: .primary) {
                 active = tabs.open(name: "add-\(Int(Date().timeIntervalSince1970))", title: L("button.add"))
             }
-            WireButton(title: L("button.batchDelete"), icon: "delete", variant: .danger, disabled: selected.isEmpty) {
+            WireButton(title: L("button.batchDelete"), icon: "delete", variant: .danger, disabled: viewModel.selected.isEmpty) {
                 showBatchDelete = true
             }
-            WireButton(title: L("button.batchResetPwd"), icon: "password-reset", variant: .ghost, disabled: selected.isEmpty) {
+            WireButton(title: L("button.batchResetPwd"), icon: "password-reset", variant: .ghost, disabled: viewModel.selected.isEmpty) {
                 resetPwdText = ""; resetPwdError = ""
                 showResetPwd = true
             }
@@ -337,9 +329,9 @@ struct EumUserView: View {
     }
 
     private func row(_ idx: Int) -> some View {
-        let user = rows[idx]
+        let user = viewModel.rows[idx]
         return HStack(spacing: 0) {
-            TableCell(text: "\(idx + 1 + (page - 1) * pageSize)", width: 60, align: .center, color: Theme.textSecondary)
+            TableCell(text: "\(idx + 1 + (viewModel.page - 1) * viewModel.pageSize)", width: 60, align: .center, color: Theme.textSecondary)
             TableCell(text: user.username)
             TableCell(text: user.nickName)
             TableCell(text: user.phone, width: 140)
@@ -375,19 +367,19 @@ struct EumUserView: View {
                     if tab.name.hasPrefix("add-") {
                         UserFormView(onClose: { closeTab(tab.name) }) {
                             closeTab(tab.name)
-                            Task { await load() }
+                            Task { await reload() }
                         }
                     } else if tab.name.hasPrefix("edit-") {
                         let id = Int(tab.name.replacingOccurrences(of: "edit-", with: "")) ?? 0
-                        if let user = rows.first(where: { $0.id == id }) {
+                        if let user = viewModel.rows.first(where: { $0.id == id }) {
                             UserFormView(user: user, onClose: { closeTab(tab.name) }) {
                                 closeTab(tab.name)
-                                Task { await load() }
+                                Task { await reload() }
                             }
                         }
                     } else if tab.name.hasPrefix("detail-") {
                         let id = Int(tab.name.replacingOccurrences(of: "detail-", with: "")) ?? 0
-                        if let user = rows.first(where: { $0.id == id }) {
+                        if let user = viewModel.rows.first(where: { $0.id == id }) {
                             UserDetailView(user: user, onClose: { closeTab(tab.name) })
                         }
                     }
@@ -404,40 +396,32 @@ struct EumUserView: View {
     // MARK: 数据
     private var selectedIndexes: Set<Int> {
         // 行索引集合（基于 page 内行）
-        Set(rows.enumerated().compactMap { selected.contains($0.element.id) ? $0.offset : nil })
+        Set(viewModel.rows.enumerated().compactMap { viewModel.selected.contains($0.element.id) ? $0.offset : nil })
     }
 
     private func onToggleRow(_ idx: Int) {
-        let id = rows[idx].id
-        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+        let id = viewModel.rows[idx].id
+        if viewModel.selected.contains(id) {
+            viewModel.selected.remove(id)
+        } else {
+            viewModel.selected.insert(id)
+        }
     }
 
-    private func load(append: Bool = false) async {
-        loading = true
-        defer { loading = false }
-        do {
-            let result = try await store.userPage(page: page, size: pageSize, username: username, phone: phone, status: status)
-            rows = append ? rows + result.content : result.content
-            total = result.total
-            hasMore = !result.content.isEmpty && rows.count < total
-            if !append { selected.removeAll() }
-        } catch {
-            if append { page -= 1 }
-            app.toast(error, fallback: L("common.loadFailed"))
-        }
+    private func reload() async {
+        do { try await viewModel.load() }
+        catch { app.toast(error, fallback: L("common.loadFailed")) }
     }
 
     /// 手机端：页脚触发加载下一页
     private func loadMore() async {
-        guard !loading, hasMore else { return }
-        page += 1
-        await load(append: true)
+        do { try await viewModel.loadMore() }
+        catch { app.toast(error, fallback: L("common.loadFailed")) }
     }
 
     private func toggleStatus(_ user: SysUser, _ on: Bool) async {
         do {
-            try await store.userStatus(id: user.id, status: on ? 1 : 0)
-            rows = rows.map { $0.id == user.id ? user : $0 }
+            try await viewModel.setStatus(user, on: on)
             app.toastSuccess(L("user.statusChanged"))
         } catch {
             app.toast(error, fallback: L("common.opFailed"))
@@ -446,13 +430,12 @@ struct EumUserView: View {
 
     private func doBatchDelete() async {
         do {
-            try await store.userDelete(ids: Array(selected))
+            try await viewModel.batchDelete()
             app.toastSuccess(L("common.deleted"))
         } catch {
             app.toast(error, fallback: L("button.delete") + L("common.opFailed"))
         }
-        selected.removeAll()
-        await load()
+        await reload()
     }
 
     private func doResetPwd() async {
@@ -462,9 +445,9 @@ struct EumUserView: View {
             return
         }
         do {
-            try await store.userResetPassword(ids: Array(selected), newPassword: resetPwdText)
+            try await viewModel.resetPassword(for: Array(viewModel.selected), newPassword: resetPwdText)
             app.toastSuccess(String(format: L("user.batchResetDone"), resetPwdText))
-            selected.removeAll()
+            viewModel.clearSelection()
         } catch {
             app.toast(error, fallback: L("user.resetFailed"))
         }
@@ -478,7 +461,7 @@ struct EumUserView: View {
             return
         }
         do {
-            try await store.userResetPassword(id: target.id, oldPassword: nil, newPassword: singlePwdText)
+            try await viewModel.resetPassword(id: target.id, newPassword: singlePwdText)
             app.toastSuccess(String(format: L("user.resetDone"), singlePwdText))
             pwdTarget = nil
         } catch {
@@ -493,6 +476,8 @@ struct EumUserView: View {
 struct UserFormView: View {
     @EnvironmentObject var app: AppState
     @EnvironmentObject var store: DataService
+    /// 服务协议注入（真实 / Mock 由 AppEnvironment 装配）
+    var service: UserServiceProtocol = AppEnvironment.shared.users
     var user: SysUser? = nil
     var onClose: () -> Void
     var onSuccess: () -> Void
@@ -580,7 +565,7 @@ struct UserFormView: View {
         .task {
             guard let user, !hydrated else { return }
             hydrated = true
-            if let detail = try? await store.userDetail(id: user.id) {
+            if let detail = try? await service.detail(id: user.id) {
                 form = detail
                 roleSelection = Set(detail.roleIds)
                 postSelection = Set(detail.postIds)
@@ -638,10 +623,10 @@ struct UserFormView: View {
         defer { loading = false }
         do {
             if isEdit {
-                try await store.userUpdate(form)
+                try await service.update(form)
                 app.toastSuccess(L("common.updated"))
             } else {
-                try await store.userInsert(form, password: password)
+                try await service.insert(form, password: password)
                 app.toastSuccess(L("common.added"))
             }
             onSuccess()
@@ -660,6 +645,7 @@ struct DeptPick: Identifiable, Hashable {
 
 struct UserDetailView: View {
     @EnvironmentObject var store: DataService
+    var service: UserServiceProtocol = AppEnvironment.shared.users
     let user: SysUser
     var onClose: () -> Void
 
@@ -699,7 +685,7 @@ struct UserDetailView: View {
         }
         /// 按 ID 拉取完整明细（角色 / 岗位 / 部门关联）
         .task {
-            if let fetched = try? await store.userDetail(id: user.id) {
+            if let fetched = try? await service.detail(id: user.id) {
                 detail = fetched
             }
         }

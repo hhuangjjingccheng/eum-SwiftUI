@@ -161,7 +161,8 @@ struct MobileCardList: View {
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            VStack(spacing: 10) {
+            // LazyVStack：长列表只构建可见卡片，滚动更稳
+            LazyVStack(spacing: 10) {
                 if selectMode {
                     selectHeader
                 }
