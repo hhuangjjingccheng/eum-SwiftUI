@@ -163,11 +163,15 @@ final class AppState: ObservableObject {
             currentRoute = route
             visitedTags = [VisitTag(route: route)]
         }
-        // 已有 token：静默恢复会话
-        if isLoggedIn {
-            Task { [weak self] in
-                await self?.restoreSession()
-            }
+        // 内置兜底词表先行（无网络时登录 / 注册页也有中英文），随后服务端词条覆盖
+        I18n.apply(languageJson: DataService.shared.sysConfig.languageJson, language: "system")
+
+        // 启动即调用 /sys/config/getConfig（免认证）：登录 / 注册页的主题色与多语言首屏生效；
+        // 已有 token 时继续静默恢复会话
+        Task { [weak self] in
+            await DataService.shared.loadSysConfig()
+            guard let self, isLoggedIn else { return }
+            await self.restoreSession()
         }
     }
 

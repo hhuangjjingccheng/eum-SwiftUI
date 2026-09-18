@@ -76,19 +76,8 @@ final class DataService: ObservableObject {
             AppState.shared.currentUser = SysUser(dict: info)
             menus = JV.dictArray(info["eumRbacMenuList"]).map(SysMenu.init)
         }
-        // 2. /sys/config（多语言表 + 主题）
-        if let cfg = try? await api.get("sys/config"), let d = cfg as? [String: Any] {
-            var c = SysConfig()
-            c.configId = JV.int(d["eumConfigId"]) ?? 0
-            c.themeColor = JV.string(d["themeColor"])
-            c.assistantApiKeyId = JV.int(d["eumEumAiApiKey"])
-            c.language = JV.string(d["language"]).isEmpty ? "zh-CN" : JV.string(d["language"])
-            c.languageJson = d["languageJson"] as? [String: Any] ?? [:]
-            sysConfig = c
-            Theme.applyThemeColor(c.themeColor)
-            I18n.apply(languageJson: c.languageJson, language: c.language)
-            APIClient.shared.language = I18n.language
-        }
+        // 2. /sys/config/getConfig（多语言表 + 主题色；接口改动后统一收敛到 loadSysConfig）
+        await loadSysConfig()
         // 3. 基础引用数据（并行拉取，失败不阻塞）
         async let rolesTask: () = loadRoles()
         async let postsTask: () = loadPosts()
@@ -403,8 +392,10 @@ final class DataService: ObservableObject {
 
     // MARK: - 系统配置
 
+    /// GET /sys/config/getConfig（免认证：登录 / 注册页启动时即可取到配置；
+    /// 未认证时服务端不返回 eumEumAiApiKey）
     func loadSysConfig() async {
-        if let data = try? await api.get("sys/config"), let d = data as? [String: Any] {
+        if let data = try? await api.get("sys/config/getConfig"), let d = data as? [String: Any] {
             var c = SysConfig()
             c.configId = JV.int(d["eumConfigId"]) ?? 0
             c.themeColor = JV.string(d["themeColor"])
@@ -415,17 +406,23 @@ final class DataService: ObservableObject {
             Theme.applyThemeColor(c.themeColor)
             I18n.apply(languageJson: c.languageJson, language: c.language)
             APIClient.shared.language = I18n.language
+            // 词条 / 主题变化驱动全局重建（登录 / 注册页观察 app 即可刷新）
+            AppState.shared.i18nVersion += 1
         }
     }
 
     func saveSysConfig(_ c: SysConfig) async throws {
-        try await api.put("sys/config", [
-            "eumConfigId": c.configId,
+        // PUT /sys/config/updateConfig（EumConfigUpdateDTO 无 eumConfigId 字段；
+        // 服务端 MapStruct 对 null 忽略更新，故未设置的项不要传，避免误覆盖）
+        var body: [String: Any] = [
             "themeColor": c.themeColor,
-            "eumEumAiApiKey": c.assistantApiKeyId ?? 0,
             "language": c.language,
             "languageJson": c.languageJson,
-        ])
+        ]
+        if let apiKeyId = c.assistantApiKeyId {
+            body["eumEumAiApiKey"] = apiKeyId
+        }
+        try await api.put("sys/config/updateConfig", body)
     }
 
     // MARK: - AI 配置
